@@ -1,6 +1,6 @@
 # keyscanner
 
-<img width="1024" height="761" alt="image" src="https://github.com/user-attachments/assets/55d10e57-d13c-4d4a-b696-41278fc0a909" />
+<img width="700" height="501" alt="image" src="https://github.com/user-attachments/assets/55d10e57-d13c-4d4a-b696-41278fc0a909" />
 
 
 
