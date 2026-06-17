@@ -1,5 +1,9 @@
 # keyscanner
 
+<img width="700" height="501" alt="image" src="https://github.com/user-attachments/assets/55d10e57-d13c-4d4a-b696-41278fc0a909" />
+
+
+
 `keyscanner` is a Node.js security-research CLI that scans a website's frontend JavaScript (linked and inline) — and, optionally, public GitHub source — for accidentally committed API keys and secrets. It **detects and reports** exposed credentials so they can be rotated and remediated; it never authenticates with, validates, or otherwise uses any key it finds. Think of it as a focused, browser-facing companion to tools like gitleaks or TruffleHog.
 
 ## Installation
