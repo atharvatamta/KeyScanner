@@ -1,0 +1,4 @@
+# sample site list
+http://127.0.0.1:8799/
+https://example.com
+http://127.0.0.1:9/
