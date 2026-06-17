@@ -16,6 +16,7 @@ import pLimit from 'p-limit';
 
 import { scanUrl } from './scanner.js';
 import { scanGitHub, scanGitHubAll, RateLimitError } from './github.js';
+import { BANNER, BANNER_WIDTH } from './banner.js';
 import {
   printFindings,
   printGithubFindings,
@@ -28,13 +29,52 @@ import {
 
 const program = new Command();
 
+/**
+ * Print the startup banner to stderr (so it never corrupts --json stdout).
+ * On terminals narrower than the 3D art, fall back to a compact one-liner
+ * — unless `force` is set (explicit `banner` command), which always shows
+ * the full art.
+ */
+function printBanner(force = false) {
+  const cols = process.stderr.columns || 80;
+  if (force || cols >= BANNER_WIDTH) {
+    console.error(chalk.cyan(BANNER));
+  } else {
+    console.error(chalk.bold.cyan('keyscanner'));
+  }
+  console.error(
+    chalk.dim('  v1.0.0 · detect & report, never exploit') + '\n'
+  );
+}
+
 program
   .name('keyscanner')
   .description(
     'Scan website frontend JavaScript and public source for exposed API keys.\n' +
       'Responsible-disclosure tool: always report findings, never exploit them.'
   )
-  .version('1.0.0');
+  .version('1.0.0')
+  .option('--no-banner', 'Suppress the startup banner');
+
+// Show the banner before any command action, but skip it for --json output
+// (kept clean) and when --no-banner is set. --help / --version never trigger
+// preAction, so they stay banner-free automatically.
+program.hook('preAction', (thisCommand, actionCommand) => {
+  // The `banner` command prints the banner itself — don't double it here.
+  if (actionCommand.name() === 'banner') return;
+  const opts = actionCommand.opts();
+  if (program.opts().banner !== false && !opts.json) {
+    printBanner();
+  }
+});
+
+/* ---------------------------------------------------------------- banner -- */
+program
+  .command('banner')
+  .description('Print the keyscanner banner and exit')
+  .action(() => {
+    printBanner(true);
+  });
 
 /* ------------------------------------------------------------------ scan -- */
 program
@@ -323,6 +363,13 @@ function pad(str, width) {
 
 function truncateUrl(url, max) {
   return url.length > max ? url.slice(0, max - 1) + '…' : url;
+}
+
+// Bare `keyscanner` (no command/args): show the banner, then the help.
+if (process.argv.slice(2).length === 0) {
+  printBanner(true);
+  program.outputHelp();
+  process.exit(0);
 }
 
 program.parseAsync(process.argv).catch((err) => {

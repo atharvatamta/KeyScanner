@@ -17,6 +17,10 @@ After the global install, the `keyscanner` command is available on your `PATH`. 
 
 ## Usage
 
+On startup `keyscanner` prints a cyan 3D ASCII-art banner to **stderr** (so it never interferes with `--json` output). On terminals narrower than the art it shows a compact one-line version. Disable it any time with the global `--no-banner` flag; it's also auto-hidden in `--json` mode.
+
+Running `keyscanner` with no command prints the banner followed by the help text. You can also print the banner on demand with `keyscanner banner`.
+
 ### `scan` — scan a single site
 
 ```bash
