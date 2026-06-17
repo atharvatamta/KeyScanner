@@ -70,7 +70,8 @@ keyscanner github "AKIA amazonaws" -o gh-report.json
 | --- | --- | --- |
 | `--token <token>` | GitHub personal access token (recommended; or set `GITHUB_TOKEN`) | — |
 | `--all` | Scan with **every** built-in pattern instead of a single query | off |
-| `--max <n>` | Max files to check (per pattern when using `--all`) | `10` |
+| `--self` | Audit **all repos owned by your authenticated account** (public + private) | off |
+| `--max <n>` | Max files per pattern (`--all`), or max repos to scan (`--self`) | `10` |
 | `-o, --output <file>` | Save a JSON report | — |
 | `--json` | Print the JSON report to stdout (suppresses formatted output) | off |
 | `-v, --verbose` | Log each file scanned | off |
@@ -92,6 +93,23 @@ Notes:
 - `--all` runs ~14 searches, so a `--token` is strongly recommended — unauthenticated requests are blocked/rate-limited almost immediately. If a rate limit is hit mid-run, the tool stops early and returns the partial results gathered so far.
 - `--max` becomes the file budget **per seed**.
 - 14 of the 21 patterns have search seeds; patterns without a distinctive literal (generic secrets, bearer tokens, contextual AWS/Twilio matches) can't seed a search, but they are still applied to every file that is fetched.
+
+#### `--self` — audit your own repos
+
+Scan every repository **you own** for leaked secrets — a defensive self-audit. Unlike Code Search, this reads your repos directly, so it covers **private repos too** and scans the *whole* repo, not just search hits.
+
+```bash
+keyscanner github --self --token "$GITHUB_TOKEN"
+keyscanner github --self --max 50 -o my-audit.json
+```
+
+How it works: it identifies you via your token (`GET /user`), lists your owned repos (most-recently-updated first), and for each one walks the default-branch file tree and scans every text/code file (fetched through the authenticated blobs API) against all patterns. Findings are reported per file with a direct link to the file on GitHub.
+
+Notes:
+- **A `--token` is required** (it must know who "you" are, and needs `repo` scope to read private repos).
+- `--max` here is the **number of repos** to scan (default `20`, most-recently-updated first); raise it to cover more.
+- Forks are skipped. Per repo, only text/code files are scanned (binaries, images, fonts, etc. are ignored), files over ~1 MB are skipped, and very large repos are capped at 400 files.
+- This is the recommended way to find your *own* leaks — rotate anything it reports.
 
 ### `bulk` — scan many sites
 

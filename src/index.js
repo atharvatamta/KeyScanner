@@ -15,7 +15,7 @@ import ora from 'ora';
 import pLimit from 'p-limit';
 
 import { scanUrl } from './scanner.js';
-import { scanGitHub, scanGitHubAll, RateLimitError } from './github.js';
+import { scanGitHub, scanGitHubAll, scanGitHubSelf, RateLimitError } from './github.js';
 import { BANNER, BANNER_WIDTH } from './banner.js';
 import {
   printFindings,
@@ -129,11 +129,12 @@ program
 /* ---------------------------------------------------------------- github -- */
 program
   .command('github')
-  .description('Search public GitHub code for exposed API keys')
-  .argument('[query]', 'Code search query (omit when using --all)')
+  .description('Scan GitHub for exposed API keys (code search, --all patterns, or --self repo audit)')
+  .argument('[query]', 'Code search query (omit when using --all or --self)')
   .option('--token <token>', 'GitHub personal access token (recommended)')
   .option('--all', 'Scan using ALL built-in patterns instead of one query', false)
-  .option('--max <n>', 'Max files to check (per pattern when using --all)', '10')
+  .option('--self', "Audit ALL repos owned by your authenticated account (public + private)", false)
+  .option('--max <n>', 'Max files per pattern (--all), or max repos (--self)', '10')
   .option('-o, --output <file>', 'Save JSON report')
   .option('--json', 'Print the JSON report to stdout (suppresses formatted output)', false)
   .option('-v, --verbose', 'Show each file being scanned', false)
@@ -149,37 +150,55 @@ Scan with every built-in pattern (no query needed):
   $ keyscanner github --all --token "$GITHUB_TOKEN"
   $ keyscanner github --all --max 5 --json
 
+Audit your own account's repos (self-audit, public + private):
+  $ keyscanner github --self --token "$GITHUB_TOKEN"
+  $ keyscanner github --self --max 50 -o my-audit.json
+
 Note: GitHub Code Search requires authentication for most queries.
-Pass --token, or set the GITHUB_TOKEN environment variable.`
+--self requires a token. Pass --token, or set GITHUB_TOKEN.`
   )
   .action(async (query, opts) => {
     const token = opts.token || process.env.GITHUB_TOKEN;
     const jsonMode = opts.json;
 
-    if (!opts.all && !query) {
+    if (opts.self && !token) {
       console.error(
-        chalk.red('Error: provide a search query, or use --all to scan with ' +
-          'every built-in pattern.')
+        chalk.red('Error: --self requires a --token (it scans your account\'s repos).')
       );
       process.exit(2);
     }
-    if (opts.all && query) {
+    if (!opts.self && !opts.all && !query) {
       console.error(
-        chalk.yellow('Note: --all ignores the provided query; scanning with ' +
-          'all built-in patterns.')
+        chalk.red('Error: provide a search query, or use --all (every pattern) ' +
+          'or --self (your own repos).')
+      );
+      process.exit(2);
+    }
+    if (query && (opts.all || opts.self)) {
+      console.error(
+        chalk.yellow(`Note: ${opts.self ? '--self' : '--all'} ignores the provided query.`)
       );
     }
 
-    const spinner = jsonMode
-      ? null
-      : ora(opts.all ? 'Searching GitHub (all patterns)...' : 'Searching GitHub...').start();
+    const mode = opts.self ? 'self' : opts.all ? 'all-patterns' : 'query';
+    const spinnerText = {
+      self: 'Auditing your GitHub repos...',
+      'all-patterns': 'Searching GitHub (all patterns)...',
+      query: 'Searching GitHub...',
+    }[mode];
+    const spinner = jsonMode ? null : ora(spinnerText).start();
+
     let results;
     try {
-      const maxResults = parseInt(opts.max, 10) || 10;
-      results = opts.all
-        ? await scanGitHubAll({ token, maxResults, verbose: opts.verbose })
-        : await scanGitHub(query, { token, maxResults, verbose: opts.verbose });
-      spinner?.succeed('GitHub scan complete.');
+      const maxN = parseInt(opts.max, 10) || (opts.self ? 20 : 10);
+      if (opts.self) {
+        results = await scanGitHubSelf({ token, maxRepos: maxN, verbose: opts.verbose });
+      } else if (opts.all) {
+        results = await scanGitHubAll({ token, maxResults: maxN, verbose: opts.verbose });
+      } else {
+        results = await scanGitHub(query, { token, maxResults: maxN, verbose: opts.verbose });
+      }
+      spinner?.succeed(opts.self ? 'Self-audit complete.' : 'GitHub scan complete.');
     } catch (err) {
       spinner?.fail('GitHub scan failed.');
       if (err instanceof RateLimitError) {
@@ -198,10 +217,15 @@ Pass --token, or set the GITHUB_TOKEN environment variable.`
       process.exit(2);
     }
 
+    const queryLabel = {
+      self: '(self: all owned repos)',
+      'all-patterns': '(all built-in patterns)',
+      query,
+    }[mode];
     const report = {
       timestamp: new Date().toISOString(),
-      query: opts.all ? '(all built-in patterns)' : query,
-      mode: opts.all ? 'all-patterns' : 'query',
+      query: queryLabel,
+      mode,
       scannedFiles: results.length,
       totalFindings: results.reduce((n, r) => n + r.findings.length, 0),
       results,

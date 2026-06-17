@@ -10,11 +10,38 @@
 
 import fetch from 'node-fetch';
 import beautify from 'js-beautify';
+import pLimit from 'p-limit';
 import { scanContent } from './scanner.js';
 import { patterns } from './patterns.js';
 
 const USER_AGENT = 'keyscanner/1.0 (security research)';
 const jsBeautify = beautify.js;
+
+// File types worth scanning in a full-repo (--self) sweep. Anything else
+// (images, fonts, archives, compiled binaries) is skipped.
+const SCANNABLE_EXT = new Set([
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'vue', 'svelte',
+  'json', 'json5', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'config',
+  'env', 'properties', 'xml', 'html', 'htm',
+  'py', 'rb', 'go', 'php', 'java', 'cs', 'kt', 'swift', 'rs', 'c', 'cpp', 'h',
+  'sh', 'bash', 'zsh', 'ps1', 'tf', 'tfvars', 'gradle', 'txt', 'md',
+]);
+
+// Extensionless filenames that commonly hold secrets/config.
+const SCANNABLE_NAMES = new Set([
+  '.env', 'dockerfile', 'makefile', '.npmrc', '.netrc', 'procfile',
+]);
+
+const JS_LIKE_EXT = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs']);
+
+function isScannablePath(p) {
+  const name = p.split('/').pop().toLowerCase();
+  if (SCANNABLE_NAMES.has(name)) return true;
+  if (name.startsWith('.env')) return true; // .env.local, .env.production, …
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  return SCANNABLE_EXT.has(name.slice(dot + 1));
+}
 
 /**
  * Thrown when GitHub responds with a rate-limit error. Carries the reset
@@ -256,6 +283,208 @@ export async function scanGitHubAll(options = {}) {
     out.push(entry);
   }
   return out;
+}
+
+/**
+ * Authenticated GET returning parsed JSON, with rate-limit / error handling.
+ */
+async function ghJson(url, token, timeout = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  let res;
+  try {
+    res = await fetch(url, { headers: buildHeaders(token), signal: controller.signal });
+  } catch (err) {
+    throw new Error(`request to ${url} failed: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  checkRateLimit(res);
+  if (res.status === 401) {
+    throw new Error('GitHub authentication failed — check your --token.');
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`GitHub API ${res.status} for ${url}: ${body.slice(0, 160)}`);
+  }
+  return res.json();
+}
+
+/**
+ * Scan every scannable file in a single repo (default branch) by reading the
+ * recursive git tree and fetching each blob. Works for private repos too,
+ * since blobs are fetched with the authenticated API (not the raw host).
+ *
+ * @returns {Promise<Array<{repo, file, htmlUrl, findings}>>} one entry per
+ *          file that had at least one finding.
+ */
+async function scanRepo(repo, token, opts = {}) {
+  const {
+    maxFiles = 400,
+    maxBytes = 1_000_000,
+    concurrency = 6,
+    verbose = false,
+  } = opts;
+
+  const branch = repo.default_branch;
+  if (!branch) return [];
+
+  let tree;
+  try {
+    tree = await ghJson(
+      `https://api.github.com/repos/${repo.full_name}/git/trees/${branch}?recursive=1`,
+      token
+    );
+  } catch (err) {
+    if (err instanceof RateLimitError) throw err;
+    if (verbose) console.error(`  ⚠ ${repo.full_name}: could not read tree: ${err.message}`);
+    return [];
+  }
+
+  let blobs = (tree.tree || []).filter(
+    (t) => t.type === 'blob' && isScannablePath(t.path) && (t.size == null || t.size <= maxBytes)
+  );
+
+  if (tree.truncated && verbose) {
+    console.error(`  ⚠ ${repo.full_name}: git tree was truncated by GitHub — some files skipped.`);
+  }
+  if (blobs.length > maxFiles) {
+    if (verbose) {
+      console.error(`  ⚠ ${repo.full_name}: ${blobs.length} files, scanning first ${maxFiles}.`);
+    }
+    blobs = blobs.slice(0, maxFiles);
+  }
+
+  if (verbose) {
+    console.error(`  • ${repo.full_name} (${repo.private ? 'private' : 'public'}): ${blobs.length} files`);
+  }
+
+  const limit = pLimit(concurrency);
+  const perFile = [];
+
+  await Promise.all(
+    blobs.map((b) =>
+      limit(async () => {
+        try {
+          const blob = await ghJson(
+            `https://api.github.com/repos/${repo.full_name}/git/blobs/${b.sha}`,
+            token
+          );
+          let content =
+            blob.encoding === 'base64'
+              ? Buffer.from(blob.content || '', 'base64').toString('utf8')
+              : blob.content || '';
+
+          const ext = b.path.split('.').pop().toLowerCase();
+          if (JS_LIKE_EXT.has(ext)) {
+            try {
+              content = jsBeautify(content, { indent_size: 2 });
+            } catch {
+              /* keep raw */
+            }
+          }
+
+          const findings = scanContent(content, `${repo.full_name}/${b.path}`);
+          if (findings.length > 0) {
+            perFile.push({
+              repo: repo.full_name,
+              file: b.path,
+              htmlUrl: `${repo.html_url}/blob/${branch}/${b.path}`,
+              findings,
+            });
+          }
+        } catch (err) {
+          if (err instanceof RateLimitError) throw err;
+          if (verbose) console.error(`  ⚠ ${repo.full_name}/${b.path}: ${err.message}`);
+        }
+      })
+    )
+  );
+
+  return perFile;
+}
+
+/**
+ * Scan all repos owned by the authenticated user for exposed secrets.
+ * This is a defensive self-audit: it reads YOUR OWN repos (public + private)
+ * via your token and reports what's leaking so you can rotate/remove it.
+ *
+ * @param {object} options
+ * @param {string} options.token            Required — identifies "self".
+ * @param {number} [options.maxRepos=20]    Max repos to scan (most-recently updated first).
+ * @param {boolean} [options.includeForks=false]
+ * @param {number} [options.concurrency=4]  Repos scanned in parallel.
+ * @param {boolean} [options.verbose=false]
+ * @returns {Promise<Array<{repo, file, htmlUrl, findings}>>}
+ */
+export async function scanGitHubSelf(options = {}) {
+  const {
+    token,
+    maxRepos = 20,
+    includeForks = false,
+    concurrency = 4,
+    verbose = false,
+  } = options;
+
+  if (!token) {
+    throw new Error("--self requires a --token: it scans YOUR authenticated account's repos.");
+  }
+
+  const me = await ghJson('https://api.github.com/user', token);
+  if (verbose) console.error(`  authenticated as ${me.login}`);
+
+  // List owned repos (paginated), most-recently-updated first.
+  const repos = [];
+  for (let page = 1; page <= 10; page++) {
+    const batch = await ghJson(
+      `https://api.github.com/user/repos?per_page=100&page=${page}&affiliation=owner&sort=updated`,
+      token
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    for (const r of batch) {
+      if (!includeForks && r.fork) continue;
+      repos.push(r);
+    }
+    if (batch.length < 100 || repos.length >= maxRepos) break;
+  }
+
+  const target = repos.slice(0, maxRepos);
+  if (verbose) {
+    console.error(`  scanning ${target.length} repo(s) of ${me.login} (max ${maxRepos}).`);
+  }
+  if (repos.length > maxRepos) {
+    console.error(
+      `  note: you own more than ${maxRepos} repos; scanning the ${maxRepos} most ` +
+        `recently updated. Raise with --max.`
+    );
+  }
+
+  const repoLimit = pLimit(concurrency);
+  const all = [];
+
+  try {
+    const results = await Promise.all(
+      target.map((repo) =>
+        repoLimit(() =>
+          scanRepo(repo, token, { verbose }).catch((err) => {
+            if (err instanceof RateLimitError) throw err;
+            if (verbose) console.error(`  ⚠ ${repo.full_name}: ${err.message}`);
+            return [];
+          })
+        )
+      )
+    );
+    for (const r of results) all.push(...r);
+  } catch (err) {
+    if (err instanceof RateLimitError) {
+      console.error('  ⚠ rate limit hit — returning partial results.');
+      if (err.resetDate) console.error(`    resets at ${err.resetDate.toLocaleString()}`);
+    } else {
+      throw err;
+    }
+  }
+
+  return all;
 }
 
 export default scanGitHub;
