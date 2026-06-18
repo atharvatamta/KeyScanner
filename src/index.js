@@ -9,6 +9,7 @@
 
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import readline from 'node:readline/promises';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -29,22 +30,107 @@ import {
 
 const program = new Command();
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Print the startup banner to stderr (so it never corrupts --json stdout).
- * On terminals narrower than the 3D art, fall back to a compact one-liner
+ * On terminals narrower than the block art, fall back to a compact one-liner
  * — unless `force` is set (explicit `banner` command), which always shows
  * the full art.
+ *
+ * In an interactive terminal the art is revealed line-by-line, top to bottom.
+ * When stderr isn't a TTY (piped/redirected) — or KEYSCANNER_NO_ANIM is set —
+ * it prints instantly so scripts and CI stay fast.
  */
-function printBanner(force = false) {
+async function printBanner(force = false) {
   const cols = process.stderr.columns || 80;
   if (force || cols >= BANNER_WIDTH) {
-    console.error(chalk.cyan(BANNER));
+    const animate = process.stderr.isTTY && !process.env.KEYSCANNER_NO_ANIM;
+    if (animate) {
+      for (const line of BANNER.split('\n')) {
+        console.error(chalk.cyan(line));
+        await sleep(50);
+      }
+    } else {
+      console.error(chalk.cyan(BANNER));
+    }
   } else {
     console.error(chalk.bold.cyan('keyscanner'));
   }
   console.error(
-    chalk.dim('  v1.0.0 · detect & report, never exploit') + '\n'
+    chalk.dim(' detect & report, never exploit \n by Atharva Tamta') + '\n'
   );
+}
+
+/**
+ * Interactive startup menu shown when keyscanner is run with no arguments in
+ * a terminal. Walks the user through the two main scan modes and returns the
+ * argv to dispatch (e.g. ['scan', 'https://…']), the string 'help' to print
+ * full usage, or null to quit. Prompts go to stderr so stdout stays clean.
+ */
+async function interactiveMenu() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  const num = (n) => chalk.cyan.bold(n);
+  try {
+    console.error(chalk.bold('What would you like to scan?\n'));
+    console.error(`  ${num('1')}  A website   ${chalk.gray('— fetch a URL and scan its JavaScript for exposed keys')}`);
+    console.error(`  ${num('2')}  GitHub      ${chalk.gray('— search public code, or audit your own repos')}`);
+    console.error(`  ${num('3')}  All commands & options`);
+    console.error(`  ${num('q')}  Quit\n`);
+
+    const choice = (await rl.question(chalk.bold('Choose [1/2/3/q]: '))).trim().toLowerCase();
+
+    if (choice === '1') {
+      const url = (await rl.question('\nWebsite URL: ')).trim();
+      if (!url) {
+        console.error(chalk.red('No URL entered — nothing to scan.'));
+        return null;
+      }
+      return ['scan', url];
+    }
+
+    if (choice === '2') {
+      console.error(`\n  ${num('1')}  Search by keyword/query   ${chalk.gray('e.g. "AIzaSy firebase"')}`);
+      console.error(`  ${num('2')}  Scan with all built-in patterns`);
+      console.error(`  ${num('3')}  Audit my own repos        ${chalk.gray('(--self, needs a token)')}\n`);
+      const sub = (await rl.question(chalk.bold('Choose [1/2/3]: '))).trim();
+
+      // A token greatly raises GitHub's rate limit and is required for --self.
+      const tokenInput = (await rl.question(
+        chalk.gray('GitHub token (Enter to use $GITHUB_TOKEN or skip): ')
+      )).trim();
+      const tokenArgs = tokenInput ? ['--token', tokenInput] : [];
+
+      if (sub === '1') {
+        const query = (await rl.question('\nSearch query: ')).trim();
+        if (!query) {
+          console.error(chalk.red('No query entered.'));
+          return null;
+        }
+        return ['github', query, ...tokenArgs];
+      }
+      if (sub === '2') return ['github', '--all', ...tokenArgs];
+      if (sub === '3') {
+        if (!tokenInput && !process.env.GITHUB_TOKEN) {
+          console.error(chalk.red('Self-audit needs a token. Pass one here or set $GITHUB_TOKEN.'));
+          return null;
+        }
+        return ['github', '--self', ...tokenArgs];
+      }
+      console.error(chalk.red('Unrecognized choice.'));
+      return null;
+    }
+
+    if (choice === '3' || choice === 'h' || choice === 'help') return 'help';
+
+    // 'q', empty, or anything else: quit quietly.
+    return null;
+  } finally {
+    rl.close();
+  }
 }
 
 program
@@ -59,12 +145,12 @@ program
 // Show the banner before any command action, but skip it for --json output
 // (kept clean) and when --no-banner is set. --help / --version never trigger
 // preAction, so they stay banner-free automatically.
-program.hook('preAction', (thisCommand, actionCommand) => {
+program.hook('preAction', async (thisCommand, actionCommand) => {
   // The `banner` command prints the banner itself — don't double it here.
   if (actionCommand.name() === 'banner') return;
   const opts = actionCommand.opts();
   if (program.opts().banner !== false && !opts.json) {
-    printBanner();
+    await printBanner();
   }
 });
 
@@ -72,8 +158,8 @@ program.hook('preAction', (thisCommand, actionCommand) => {
 program
   .command('banner')
   .description('Print the keyscanner banner and exit')
-  .action(() => {
-    printBanner(true);
+  .action(async () => {
+    await printBanner(true);
   });
 
 /* ------------------------------------------------------------------ scan -- */
@@ -389,11 +475,27 @@ function truncateUrl(url, max) {
   return url.length > max ? url.slice(0, max - 1) + '…' : url;
 }
 
-// Bare `keyscanner` (no command/args): show the banner, then the help.
+// Bare `keyscanner` (no command/args): show the banner, then guide the user.
+// In an interactive terminal, offer a menu (scan a website / GitHub / help).
+// When piped or non-interactive, fall back to printing the full help.
 if (process.argv.slice(2).length === 0) {
-  printBanner(true);
-  program.outputHelp();
-  process.exit(0);
+  await printBanner(true);
+  if (process.stdin.isTTY && process.stderr.isTTY) {
+    const next = await interactiveMenu();
+    if (next === 'help') {
+      program.outputHelp();
+      process.exit(0);
+    } else if (Array.isArray(next)) {
+      console.error(chalk.gray(`\n› keyscanner ${next.join(' ')}\n`));
+      // Banner already shown above — suppress it on the dispatched run.
+      await program.parseAsync(['node', 'keyscanner', '--no-banner', ...next]);
+    } else {
+      process.exit(0);
+    }
+  } else {
+    program.outputHelp();
+    process.exit(0);
+  }
 }
 
 program.parseAsync(process.argv).catch((err) => {
