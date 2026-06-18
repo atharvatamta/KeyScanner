@@ -69,11 +69,20 @@ async function printBanner(force = false) {
  * full usage, or null to quit. Prompts go to stderr so stdout stays clean.
  */
 async function interactiveMenu() {
+  // terminal:false keeps stdin in the OS console's cooked/line mode, so pasting
+  // a URL or token works natively on Windows. (In readline's default raw mode,
+  // a pasted burst of characters is often dropped — only typed keys arrive.)
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stderr,
+    terminal: false,
   });
   const num = (n) => chalk.cyan.bold(n);
+  // Strip bracketed-paste markers / control chars some terminals wrap around
+  // pasted text, then trim surrounding whitespace.
+  const clean = (s) =>
+    s.replace(/\x1b\[20[01]~/g, '').replace(/[\x00-\x1f\x7f]/g, '').trim();
+  const ask = async (prompt) => clean(await rl.question(prompt));
   try {
     console.error(chalk.bold('What would you like to scan?\n'));
     console.error(`  ${num('1')}  A website   ${chalk.gray('— fetch a URL and scan its JavaScript for exposed keys')}`);
@@ -81,10 +90,10 @@ async function interactiveMenu() {
     console.error(`  ${num('3')}  All commands & options`);
     console.error(`  ${num('q')}  Quit\n`);
 
-    const choice = (await rl.question(chalk.bold('Choose [1/2/3/q]: '))).trim().toLowerCase();
+    const choice = (await ask(chalk.bold('Choose [1/2/3/q]: '))).toLowerCase();
 
     if (choice === '1') {
-      const url = (await rl.question('\nWebsite URL: ')).trim();
+      const url = await ask('\nWebsite URL: ');
       if (!url) {
         console.error(chalk.red('No URL entered — nothing to scan.'));
         return null;
@@ -96,16 +105,16 @@ async function interactiveMenu() {
       console.error(`\n  ${num('1')}  Search by keyword/query   ${chalk.gray('e.g. "AIzaSy firebase"')}`);
       console.error(`  ${num('2')}  Scan with all built-in patterns`);
       console.error(`  ${num('3')}  Audit my own repos        ${chalk.gray('(--self, needs a token)')}\n`);
-      const sub = (await rl.question(chalk.bold('Choose [1/2/3]: '))).trim();
+      const sub = await ask(chalk.bold('Choose [1/2/3]: '));
 
       // A token greatly raises GitHub's rate limit and is required for --self.
-      const tokenInput = (await rl.question(
+      const tokenInput = await ask(
         chalk.gray('GitHub token (Enter to use $GITHUB_TOKEN or skip): ')
-      )).trim();
+      );
       const tokenArgs = tokenInput ? ['--token', tokenInput] : [];
 
       if (sub === '1') {
-        const query = (await rl.question('\nSearch query: ')).trim();
+        const query = await ask('\nSearch query: ');
         if (!query) {
           console.error(chalk.red('No query entered.'));
           return null;
