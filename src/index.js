@@ -149,7 +149,36 @@ program
       'Responsible-disclosure tool: always report findings, never exploit them.'
   )
   .version('1.0.0')
-  .option('--no-banner', 'Suppress the startup banner');
+  .option('--no-banner', 'Suppress the startup banner')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  ${chalk.bold('scan')} — a single website's JavaScript
+    $ keyscanner scan https://example.com
+    $ keyscanner scan https://example.com -o report.json --csv report.csv
+    $ keyscanner scan https://example.com -c 5 -t 15000 --verbose
+    $ keyscanner scan https://example.com --no-inline
+    $ keyscanner scan https://site.com --json | jq '.allFindings[]'
+
+  ${chalk.bold('github')} — search public GitHub code (needs a token for most queries)
+    $ keyscanner github "AIzaSy firebase" --token "$GITHUB_TOKEN"
+    $ keyscanner github "sk_live_ stripe payment" --max 5
+    $ keyscanner github --all --token "$GITHUB_TOKEN"      # every built-in pattern
+    $ keyscanner github --self --token "$GITHUB_TOKEN"     # audit your own repos
+
+  ${chalk.bold('bulk')} — many sites from a file (one URL per line)
+    $ keyscanner bulk sites.txt
+    $ keyscanner bulk sites.txt -o reports/ --csv all-findings.csv -c 4
+
+  ${chalk.bold('other')}
+    $ keyscanner                 # interactive menu (pick website or GitHub)
+    $ keyscanner banner          # print the banner
+    $ keyscanner <command> -h    # detailed help for a command
+
+Tip: set ${chalk.cyan('GITHUB_TOKEN')} in your environment so you don't have to pass --token each time.
+Docs & full option tables: https://github.com/atharvatamta/KeyScanner`
+  );
 
 // Show the banner before any command action, but skip it for --json output
 // (kept clean) and when --no-banner is set. --help / --version never trigger
